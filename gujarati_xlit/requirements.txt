@@ -1,0 +1,25 @@
+# Minimal Requirements for Gujarati Transliteration Server
+# Core dependencies only
+
+# Web framework
+flask>=2.0.0
+
+# Fairseq for transformer models
+fairseq>=0.12.0
+
+# Fast JSON parsing
+ujson>=5.0.0
+
+# File download utility
+pydload>=1.0.0
+
+# Indian language processing
+indic-nlp-library>=0.91
+
+# PyTorch (fairseq dependency)
+torch>=1.10.0
+
+# Additional fairseq dependencies
+sacremoses>=0.0.43
+tqdm>=4.62.0
+tensorboardX>=2.5.0
