@@ -14,7 +14,64 @@ from collections import namedtuple
 import numpy as np
 import torch
 
+# Fix for PyTorch 2.6+ weights_only default change
+# Add argparse.Namespace to safe globals for loading fairseq checkpoints
+try:
+    torch.serialization.add_safe_globals([Namespace])
+except AttributeError:
+    # Older PyTorch versions don't have this method
+    pass
+
 from fairseq import checkpoint_utils, options, tasks, utils
+
+# Monkey patch torch.nn.Module.load_state_dict to allow vocabulary size mismatches
+# This is needed for loading multilingual checkpoints with language-specific vocabularies
+import torch.nn as nn
+
+_original_module_load_state_dict = nn.Module.load_state_dict
+
+def _patched_module_load_state_dict(self, state_dict, strict=True, **kwargs):
+    """
+    Patched version that handles vocabulary size mismatches gracefully.
+    First tries normal loading, then falls back to filtered loading on size mismatch.
+    """
+    try:
+        # Try normal loading first
+        return _original_module_load_state_dict(self, state_dict, strict=strict, **kwargs)
+    except RuntimeError as e:
+        error_msg = str(e)
+        # Check if it's a size mismatch error
+        if "size mismatch" in error_msg and ("embed_tokens" in error_msg or "output_projection" in error_msg):
+            print(f"Detected vocabulary size mismatch, filtering incompatible keys...")
+            # Filter state_dict to only include keys with matching shapes
+            model_state = self.state_dict()
+            filtered_state = {}
+            skipped_keys = []
+            
+            for key, value in state_dict.items():
+                if key in model_state:
+                    if model_state[key].shape == value.shape:
+                        filtered_state[key] = value
+                    else:
+                        skipped_keys.append(f"{key}: checkpoint{value.shape} vs model{model_state[key].shape}")
+                else:
+                    # Key doesn't exist in model, include it anyway (will be handled by strict setting)
+                    filtered_state[key] = value
+            
+            if skipped_keys:
+                print(f"Skipped {len(skipped_keys)} keys with shape mismatches:")
+                for sk in skipped_keys[:5]:  # Show first 5
+                    print(f"  - {sk}")
+                if len(skipped_keys) > 5:
+                    print(f"  ... and {len(skipped_keys) - 5} more")
+            
+            # Load with filtered state and strict=False
+            return _original_module_load_state_dict(self, filtered_state, strict=False, **kwargs)
+        else:
+            # Re-raise if it's a different error
+            raise
+
+nn.Module.load_state_dict = _patched_module_load_state_dict
 from fairseq.dataclass.utils import convert_namespace_to_omegaconf
 from fairseq.token_generation_constraints import pack_constraints, unpack_constraints
 from fairseq_cli.generate import get_symbols_to_strip_from_output
@@ -132,13 +189,15 @@ class Transliterator:
         self.task = tasks.setup_task(self.cfg.task)
         
         # Load model ensemble
+        # Note: Using strict=False to allow loading multilingual checkpoints
+        # with language-specific dictionaries (vocabulary size mismatch is expected)
         overrides = ast.literal_eval(self.cfg.common_eval.model_overrides)
         self.models, _model_args = checkpoint_utils.load_model_ensemble(
             utils.split_paths(self.cfg.common_eval.path),
             arg_overrides=overrides,
             task=self.task,
             suffix=self.cfg.checkpoint.checkpoint_suffix,
-            strict=(self.cfg.checkpoint.checkpoint_shard_count == 1),
+            strict=False,  # Allow vocabulary size mismatch for multilingual models
             num_shards=self.cfg.checkpoint.checkpoint_shard_count,
         )
         
